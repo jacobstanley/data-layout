@@ -10,16 +10,19 @@ module Data.Layout.Vector (
 import           Data.ByteString (ByteString)
 import           Data.ByteString.Internal (ByteString(..))
 import qualified Data.Vector.Storable as V
-import           Data.Word (Word8)
+import           Data.Word (Word8, Word32)
 import           Foreign.C (CInt)
 import           Foreign.ForeignPtr (mallocForeignPtrBytes)
 import           Foreign.ForeignPtr (withForeignPtr, castForeignPtr)
 import           Foreign.Marshal (with)
-import           Foreign.Ptr (Ptr, plusPtr)
-import           Foreign.Storable (Storable, peek)
+import           Foreign.Marshal.Alloc (alloca)
+import           Foreign.Ptr (Ptr, plusPtr, castPtr)
+import           Foreign.Storable (Storable, peek, poke)
 import           System.IO.Unsafe (unsafePerformIO)
 
-import           Data.Layout.Language (Layout (..), lsize, tsize, vsize, vcount)
+import           Data.Layout.Language (Layout(..), Endian(..))
+import           Data.Layout.Language (size, vsizeAll, vsize1, vcount)
+import           Data.Layout.Language (withValue, wsize, wendian)
 
 ------------------------------------------------------------------------
 
@@ -63,13 +66,15 @@ data Transformer = Transformer
 -- memory area (destination) using the specified layout.
 newTransformer :: Layout -> Transformer
 newTransformer layout = Transformer
-    { runT   = \n -> runLayoutCopy n (vsize layout) (layoutOps layout)
-    , sizeT  = tsize layout
+    { sizeT  = vsizeAll layout
     , countT = vcount layout
+    , runT   = \n -> runLayoutCopy n (vsize1 layout)
+                                     (needsByteSwap layout)
+                                     (layoutOps layout)
     }
 
-runLayoutCopy :: Int -> Int -> V.Vector LayoutOp -> DstSrc -> IO DstSrc
-runLayoutCopy reps valSize layout (DstSrc dst src) =
+runLayoutCopy :: Int -> Int -> Bool -> V.Vector LayoutOp -> DstSrc -> IO DstSrc
+runLayoutCopy reps valSize swapBytes layout (DstSrc dst src) =
     with dst $ \pDst ->
     with src $ \pSrc ->
     V.unsafeWith offsets $ \pOffsets -> do
@@ -80,7 +85,7 @@ runLayoutCopy reps valSize layout (DstSrc dst src) =
         numReps
         numOffsets pOffsets
         numValues valueSize
-        swapBytes
+        (if swapBytes then 1 else 0)
 
     case err of
       0 -> return ()
@@ -99,7 +104,26 @@ runLayoutCopy reps valSize layout (DstSrc dst src) =
     offsets    = V.tail layout
     numValues  = fromIntegral (fromIntegral (V.head layout) `quot` valSize)
     valueSize  = fromIntegral valSize
-    swapBytes  = 1
+
+------------------------------------------------------------------------
+-- Endian check
+
+needsByteSwap :: Layout -> Bool
+needsByteSwap x = case withValue wendian x of
+    None         -> False
+    LittleEndian -> hostIsBigEndian
+    BigEndian    -> hostIsLittleEndian
+
+endianCheck :: Word8
+endianCheck = unsafePerformIO $ alloca $ \p -> do
+    poke p (0x01020304 :: Word32)
+    peek (castPtr p :: Ptr Word8)
+
+hostIsLittleEndian :: Bool
+hostIsLittleEndian = endianCheck == 4
+
+hostIsBigEndian :: Bool
+hostIsBigEndian = endianCheck == 1
 
 ------------------------------------------------------------------------
 
@@ -152,10 +176,10 @@ layoutOps = fix . optimize . fromLayout
 
     -- convert from layout to layout operations
     fromLayout :: Layout -> V.Vector LayoutOp
-    fromLayout (Value  n)       = V.singleton (copyOp n)
+    fromLayout (Value  n)       = V.singleton (copyOp (wsize n))
     fromLayout (Offset n inner) = dropOp n `V.cons` fromLayout inner
     fromLayout (Repeat n inner) = V.concat $ replicate n $ fromLayout inner
-    fromLayout (Group  n inner) = fromLayout inner `V.snoc` dropOp (n - lsize inner)
+    fromLayout (Group  n inner) = fromLayout inner `V.snoc` dropOp (n - size inner)
 
     -- drops are positive, copies are negative
     dropOp   = fromIntegral

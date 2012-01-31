@@ -6,5 +6,6 @@ module Data.Layout (
     , module Data.Layout.Vector
     ) where
 
-import Data.Layout.Language
+import Data.Layout.Language (Layout)
+import Data.Layout.Language hiding (Layout (..), LayoutWord (..))
 import Data.Layout.Vector

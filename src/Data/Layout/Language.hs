@@ -3,23 +3,36 @@
 
 module Data.Layout.Language (
     -- * Data types
-      Layout (..)
-    , Bytes
+      Bytes
+    , Endian (..)
+    , LayoutWord (..)
+    , Layout (..)
 
-    -- * Primitives
+    -- * Combinators
     , repeat
     , offset
     , group
-    , value
+
+    -- * Values
+    , word8
+    , word16le
+    , word32le
+    , word64le
+    , word16be
+    , word32be
+    , word64be
+    , wsize
+    , wendian
 
     -- * Optimizations
     , optimize
 
     -- * Utility
     , modifyInner
-    , lsize
-    , tsize
-    , vsize
+    , withValue
+    , size
+    , vsizeAll
+    , vsize1
     , vcount
     , chunk
 
@@ -32,16 +45,29 @@ import Prelude hiding (repeat)
 
 type Bytes = Int
 
-data Layout
-    = Value  Bytes
-    | Offset Bytes Layout
-    | Group  Bytes Layout
-    | Repeat Int   Layout
-    deriving (Show, Eq)
+data Endian = None | LittleEndian | BigEndian
+  deriving (Eq, Show)
+
+data LayoutWord =
+      Word8    -- ^ 8-bit word.
+    | Word16le -- ^ 16-bit word, little endian.
+    | Word32le -- ^ 32-bit word, little endian.
+    | Word64le -- ^ 64-bit word, little endian.
+    | Word16be -- ^ 16-bit word, big endian.
+    | Word32be -- ^ 32-bit word, big endian.
+    | Word64be -- ^ 64-bit word, big endian.
+  deriving (Eq, Show)
+
+data Layout =
+      Value  LayoutWord   -- ^ The size / byte order of a value.
+    | Offset Bytes Layout -- ^ Skip n bytes before applying the inner layout.
+    | Group  Bytes Layout -- ^ Isolate n bytes to allow repetition.
+    | Repeat Int   Layout -- ^ Repeat the inner layout n times.
+  deriving (Show, Eq)
 
 
 ------------------------------------------------------------------------
--- Primitives
+-- Combinators
 
 repeat :: Int -> Layout -> Layout
 repeat n | n > 1     = Repeat n
@@ -55,10 +81,48 @@ group :: Int -> Layout -> Layout
 group n | n > 0     = Group n
         | otherwise = error "group: must request 1 or more bytes"
 
-value :: Int -> Layout
-value n | n > 0     = Value n
-        | otherwise = error "value: must request 1 or more bytes"
 
+------------------------------------------------------------------------
+-- Values
+
+word8 :: Layout
+word8 = Value Word8
+
+word16le :: Layout
+word16le = Value Word16le
+
+word32le :: Layout
+word32le = Value Word32le
+
+word64le :: Layout
+word64le = Value Word64le
+
+word16be :: Layout
+word16be = Value Word16be
+
+word32be :: Layout
+word32be = Value Word32be
+
+word64be :: Layout
+word64be = Value Word64be
+
+wsize :: LayoutWord -> Int
+wsize Word8    = 1
+wsize Word16le = 2
+wsize Word32le = 4
+wsize Word64le = 8
+wsize Word16be = 2
+wsize Word32be = 4
+wsize Word64be = 8
+
+wendian :: LayoutWord -> Endian
+wendian Word8    = None
+wendian Word16le = LittleEndian
+wendian Word32le = LittleEndian
+wendian Word64le = LittleEndian
+wendian Word16be = BigEndian
+wendian Word32be = BigEndian
+wendian Word64be = BigEndian
 
 ------------------------------------------------------------------------
 -- Optimizations
@@ -106,26 +170,27 @@ modifyInner f (Offset n inner) = Offset n (f inner)
 modifyInner f (Group  n inner) = Group  n (f inner)
 modifyInner f (Repeat n inner) = Repeat n (f inner)
 
+-- | Maps a function over the inner value.
+withValue :: (LayoutWord -> a) -> Layout -> a
+withValue f (Value  x)       = f x
+withValue f (Offset _ inner) = withValue f inner
+withValue f (Group  _ inner) = withValue f inner
+withValue f (Repeat _ inner) = withValue f inner
+
 -- | Calculates the total size of the layout.
-lsize :: Layout -> Int
-lsize (Value  x)       = x
-lsize (Offset x inner) = x + lsize inner
-lsize (Group  x _)     = x
-lsize (Repeat n inner) = n * lsize inner
+size :: Layout -> Int
+size (Value  x)       = wsize x
+size (Offset x inner) = x + size inner
+size (Group  x _)     = x
+size (Repeat n inner) = n * size inner
 
 -- | Calculates the total size of the values stored in the layout.
-tsize :: Layout -> Int
-tsize (Value  x)       = x
-tsize (Offset _ inner) = tsize inner
-tsize (Group  _ inner) = tsize inner
-tsize (Repeat n inner) = tsize inner * n
+vsizeAll :: Layout -> Int
+vsizeAll x = vsize1 x * vcount x
 
 -- | Calculates the size of a single value in the layout.
-vsize :: Layout -> Int
-vsize (Value  x)       = x
-vsize (Offset _ inner) = vsize inner
-vsize (Group  _ inner) = vsize inner
-vsize (Repeat _ inner) = vsize inner
+vsize1 :: Layout -> Int
+vsize1 = withValue wsize
 
 -- | Counts the number of times a value is repeated in the layout.
 vcount :: Layout -> Int
