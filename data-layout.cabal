@@ -1,6 +1,7 @@
 name:          data-layout
 version:       0.1.0.0
-synopsis:      Read or write Data.Vector to arbitrary binary layouts.
+synopsis:      Read/write arbitrary binary layouts in to Data.Vector.
+homepage:      http://github.com/jystic/data-layout
 license:       BSD3
 license-file:  LICENSE
 copyright:     Jacob Stanley (c) 2012
