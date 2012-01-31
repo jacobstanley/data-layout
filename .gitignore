@@ -1,0 +1,6 @@
+/dist/
+*.aux
+*.hp
+*.prof
+*.ps
+*.swp
