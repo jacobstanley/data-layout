@@ -1,4 +1,5 @@
 {-# LANGUAGE ForeignFunctionInterface #-}
+{-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE TypeSynonymInstances #-}
 
 module Data.Layout.Vector (
@@ -20,9 +21,9 @@ import           Foreign.Ptr (Ptr, plusPtr, castPtr)
 import           Foreign.Storable (Storable, peek, poke)
 import           System.IO.Unsafe (unsafePerformIO)
 
-import           Data.Layout.Language (Layout(..), Endian(..))
-import           Data.Layout.Language (size, vsizeAll, vsize1, vcount)
-import           Data.Layout.Language (withValue, wsize, wendian)
+import           Data.Layout.Language (size, byteOrder)
+import           Data.Layout.Language (valueSize1, valueSizeN, valueCount)
+import           Data.Layout.Types (Layout(..), ByteOrder(..))
 
 ------------------------------------------------------------------------
 
@@ -51,6 +52,7 @@ readVector n transformer (PS bfp off _) =
     bytes = n * sizeT transformer
     elems = n * countT transformer
 
+
 ------------------------------------------------------------------------
 
 data DstSrc = DstSrc {-# UNPACK #-} !(Ptr Word8)
@@ -66,30 +68,30 @@ data Transformer = Transformer
 -- memory area (destination) using the specified layout.
 newTransformer :: Layout -> Transformer
 newTransformer layout = Transformer
-    { sizeT  = vsizeAll layout
-    , countT = vcount layout
-    , runT   = \n -> runLayoutCopy n (vsize1 layout)
-                                     (needsByteSwap layout)
-                                     (layoutOps layout)
+    { sizeT  = valueSizeN layout
+    , countT = valueCount layout
+    , runT   = \n -> runLayoutCopy n (buildCopyInfo layout)
     }
 
-runLayoutCopy :: Int -> Int -> Bool -> V.Vector LayoutOp -> DstSrc -> IO DstSrc
-runLayoutCopy reps valSize swapBytes layout (DstSrc dst src) =
+runLayoutCopy :: Int -> CopyInfo -> DstSrc -> IO DstSrc
+runLayoutCopy reps info (DstSrc dst src) =
     with dst $ \pDst ->
     with src $ \pSrc ->
-    V.unsafeWith offsets $ \pOffsets -> do
+    V.unsafeWith (ciOffsets info) $ \pOffsets -> do
 
     -- this mutates pDst and pSrc
     err <- c_copy
         pDst pSrc
-        numReps
-        numOffsets pOffsets
-        numValues valueSize
-        (if swapBytes then 1 else 0)
+        (fromIntegral reps)
+        (ciNumOffsets info)
+        pOffsets
+        (ciNumValues info)
+        (ciValueSize info)
+        (ciSwapBytes info)
 
     case err of
       0 -> return ()
-      1 -> error ("runLayoutCopy: invalid value size: " ++ show valueSize)
+      1 -> error ("runLayoutCopy: invalid value size: " ++ show (ciValueSize info))
       _ -> error "runLayoutCopy: unknown error"
 
     -- pDst and pSrc now contain the
@@ -98,19 +100,95 @@ runLayoutCopy reps valSize swapBytes layout (DstSrc dst src) =
     src' <- peek pSrc
 
     return (DstSrc dst' src')
+
+
+------------------------------------------------------------------------
+-- CopyInfo
+
+data CopyInfo = CopyInfo
+  { ciOffsets    :: V.Vector CInt
+  , ciNumValues  :: CInt
+  , ciValueSize  :: CInt
+  , ciSwapBytes  :: CInt
+  } deriving (Show)
+
+ciNumOffsets :: CopyInfo -> CInt
+ciNumOffsets = fromIntegral . V.length . ciOffsets
+
+type SkipCopyOp = CInt
+
+-- | Build copy instructions for the specified layout.
+buildCopyInfo :: Layout -> CopyInfo
+buildCopyInfo layout =
+    CopyInfo { ciOffsets, ciNumValues, ciValueSize, ciSwapBytes }
   where
-    numReps    = fromIntegral reps
-    numOffsets = fromIntegral (V.length offsets)
-    offsets    = V.tail layout
-    numValues  = fromIntegral (fromIntegral (V.head layout) `quot` valSize)
-    valueSize  = fromIntegral valSize
+    ciNumValues = copySize `quot` ciValueSize
+    ciValueSize = fromIntegral (valueSize1 layout)
+    ciSwapBytes = if needsByteSwap layout then 1 else 0
+
+    (copySize, ciOffsets) = (splitOps . optimize . toSkipCopyOps) layout
+
+    -- convert from layout to skip/copy operations
+    toSkipCopyOps :: Layout -> V.Vector SkipCopyOp
+    toSkipCopyOps = go
+      where
+        go v@(Value _)   = V.singleton (copyOp (valueSize1 v))
+        go (Offset n xs) = skipOp n `V.cons` go xs
+        go (Repeat n xs) = V.concat (replicate n (go xs))
+        go (Group  n xs) = go xs `V.snoc` skipOp (n - size xs)
+
+        -- positive number means skip 'n' bytes
+        skipOp = fromIntegral
+
+        -- negative number means copy 'n' bytes
+        copyOp n = fromIntegral (-n)
+
+
+    -- squash copies and skips together, remove no-ops
+    optimize :: V.Vector SkipCopyOp -> V.Vector SkipCopyOp
+    optimize = skips
+      where
+        skips  = sumWhile (> 0) copies
+        copies = sumWhile (<= 0) skips
+
+        sumWhile p k xs
+            | V.null xs = V.empty
+            | otherwise = let (ys, zs) = V.span p xs
+                          in case V.sum ys of
+                              0 -> k zs
+                              s -> s `V.cons` k zs
+
+    -- ensures first and last operations are skips or no-ops,
+    -- then strips all copies out returns a tuple of the form
+    -- (copy size, skip operations)
+    splitOps :: V.Vector SkipCopyOp -> (CInt, V.Vector CInt)
+    splitOps = split . head0 . last0
+      where
+        head0 xs | V.head xs < 0 = 0 `V.cons` xs
+                 | otherwise     = xs
+
+        last0 xs | V.last xs < 0 = xs `V.snoc` 0
+                 | otherwise     = xs
+
+        split :: V.Vector SkipCopyOp -> (CInt, V.Vector CInt)
+        split xs = (-copyOp, V.filter isSkip xs)
+          where
+            copyOp = V.head (V.dropWhile (>= 0) xs)
+
+            isSkip x | x == copyOp = False -- remove
+                     | x >= 0      = True  -- keep
+                     | otherwise   = error $
+                         "buildCopyInfo: invalid copy operation " ++
+                         "(expected <" ++ show (-copyOp) ++ " bytes>," ++
+                         " actual <" ++ show (-x) ++ " bytes>)"
+
 
 ------------------------------------------------------------------------
 -- Endian check
 
 needsByteSwap :: Layout -> Bool
-needsByteSwap x = case withValue wendian x of
-    None         -> False
+needsByteSwap x = case byteOrder x of
+    NoByteOrder  -> False
     LittleEndian -> hostIsBigEndian
     BigEndian    -> hostIsLittleEndian
 
@@ -125,67 +203,9 @@ hostIsLittleEndian = endianCheck == 4
 hostIsBigEndian :: Bool
 hostIsBigEndian = endianCheck == 1
 
-------------------------------------------------------------------------
-
-type LayoutOp = CInt
-
--- | Builds a set of layout instructions for the specified layout.
-layoutOps :: Layout -> V.Vector LayoutOp
-layoutOps = fix . optimize . fromLayout
-  where
-
-    -- ensures first and last operations are drops or no-ops,
-    -- then strips all copies out and replaces them with a
-    -- single value at the start of the list
-    fix :: V.Vector LayoutOp -> V.Vector LayoutOp
-    fix = fixCopies . fixHead . fixLast
-      where
-        fixHead xs | V.head xs < 0 = 0 `V.cons` xs
-                   | otherwise     = xs
-
-        fixLast xs | V.last xs < 0 = xs `V.snoc` 0
-                   | otherwise     = xs
-
-        fixCopies :: V.Vector LayoutOp -> V.Vector LayoutOp
-        fixCopies xs = copySize `V.cons` V.filter f xs
-          where
-            copySize  = negate copyOpVal
-            copyOpVal = V.head $ V.dropWhile (>= 0) xs
-
-            f x | x == copyOpVal = False -- remove
-                | x >= 0         = True  -- keep
-                | otherwise      = error $
-                    "layoutOps: invalid copy operation " ++
-                    "(expected <" ++ show copySize ++ " bytes>," ++
-                    " actual <" ++ show (-x) ++ " bytes>)"
-
-
-    -- squash copies and drops together, remove no-ops
-    optimize :: V.Vector LayoutOp -> V.Vector LayoutOp
-    optimize = drops
-      where
-        drops  = sumWhile (> 0) copies
-        copies = sumWhile (<= 0) drops
-
-        sumWhile f r' xs
-            | V.null xs = V.empty
-            | otherwise = let (ys, zs) = V.span f xs
-                          in case V.sum ys of
-                              0 -> r' zs
-                              s -> s `V.cons` r' zs
-
-    -- convert from layout to layout operations
-    fromLayout :: Layout -> V.Vector LayoutOp
-    fromLayout (Value  n)       = V.singleton (copyOp (wsize n))
-    fromLayout (Offset n inner) = dropOp n `V.cons` fromLayout inner
-    fromLayout (Repeat n inner) = V.concat $ replicate n $ fromLayout inner
-    fromLayout (Group  n inner) = fromLayout inner `V.snoc` dropOp (n - size inner)
-
-    -- drops are positive, copies are negative
-    dropOp   = fromIntegral
-    copyOp n = fromIntegral (-n)
 
 ------------------------------------------------------------------------
+-- FFI
 
 foreign import ccall unsafe "data_layout_copy"
     c_copy :: Ptr (Ptr Word8) -- (in/out) destination memory area

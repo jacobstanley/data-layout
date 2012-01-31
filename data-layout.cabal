@@ -18,6 +18,8 @@ library
     Data.Layout
     Data.Layout.Vector
     Data.Layout.Language
+  other-modules:
+    Data.Layout.Types
 
   build-depends:
       base       == 4.*

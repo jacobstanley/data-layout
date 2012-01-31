@@ -2,10 +2,14 @@
 -- a combination of structures and arrays.
 
 module Data.Layout (
-      module Data.Layout.Language
+      Layout
+    , Bytes
+    , Reps
+    , ByteOrder(..)
+    , module Data.Layout.Language
     , module Data.Layout.Vector
     ) where
 
-import Data.Layout.Language (Layout)
-import Data.Layout.Language hiding (Layout (..), LayoutWord (..))
+import Data.Layout.Language
+import Data.Layout.Types
 import Data.Layout.Vector
