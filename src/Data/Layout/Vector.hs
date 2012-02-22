@@ -8,7 +8,9 @@ module Data.Layout.Vector (
     , readVector
     ) where
 
+import           Control.Monad (when)
 import           Data.ByteString (ByteString)
+import qualified Data.ByteString as B
 import           Data.ByteString.Internal (ByteString(..))
 import qualified Data.Vector.Storable as V
 import           Data.Word (Word8, Word32)
@@ -28,8 +30,11 @@ import           Data.Layout.Types (Layout(..), ByteOrder(..))
 ------------------------------------------------------------------------
 
 readVector :: Storable a => Int -> Transformer -> ByteString -> V.Vector a
-readVector n transformer (PS bfp off _) =
+readVector n transformer bs@(PS bfp off _) =
     unsafePerformIO $ do
+
+    -- ensure we have a big enough bytestring to fulfill the layout
+    when (bsActualSize < bsRequiredSize) (error sizeErrMsg)
 
     -- allocate memory for the vector
     vfp <- mallocForeignPtrBytes bytes
@@ -52,6 +57,14 @@ readVector n transformer (PS bfp off _) =
     bytes = n * sizeT transformer
     elems = n * countT transformer
 
+    bsActualSize   = B.length bs
+    bsRequiredSize = n * layoutSizeT transformer
+
+    sizeErrMsg =
+        "Data.Layout.Vector.readVector: The source ByteString " ++
+        "is too small to hold the data specified by the layout. " ++
+        show bsRequiredSize ++ " bytes are required, but only " ++
+        show bsActualSize ++ " bytes were provided."
 
 ------------------------------------------------------------------------
 
@@ -59,18 +72,20 @@ data DstSrc = DstSrc {-# UNPACK #-} !(Ptr Word8)
                      {-# UNPACK #-} !(Ptr Word8)
 
 data Transformer = Transformer
-    { runT   :: Int -> DstSrc -> IO DstSrc
-    , sizeT  :: Int
-    , countT :: Int
+    { runT        :: Int -> DstSrc -> IO DstSrc
+    , sizeT       :: Int
+    , countT      :: Int
+    , layoutSizeT :: Int
     }
 
 -- | Copies data from the second memory area (source) into the first
 -- memory area (destination) using the specified layout.
 newTransformer :: Layout -> Transformer
 newTransformer layout = Transformer
-    { sizeT  = valueSizeN layout
-    , countT = valueCount layout
-    , runT   = \n -> runLayoutCopy n (buildCopyInfo layout)
+    { sizeT       = valueSizeN layout
+    , countT      = valueCount layout
+    , layoutSizeT = size layout
+    , runT        = \n -> runLayoutCopy n (buildCopyInfo layout)
     }
 
 runLayoutCopy :: Int -> CopyInfo -> DstSrc -> IO DstSrc
