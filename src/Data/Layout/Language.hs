@@ -39,12 +39,14 @@ import Data.Layout.Types
 -- | Repeat a layout 'n' times.
 repeat :: Reps -> Layout -> Layout
 repeat n | n > 1     = Repeat n
-         | otherwise = invalid "repeat" "repetition must be more than 1"
+         | n == 1    = id
+         | otherwise = invalid "repeat" "repetition must be at least 1"
 
 -- | Skip 'n' bytes before accessing the next part of the layout.
 offset :: Bytes -> Layout -> Layout
 offset n | n > 0     = Offset n
-         | otherwise = invalid "offset" "must skip 1 or more bytes"
+         | n == 0    = id
+         | otherwise = invalid "offset" "must skip 0 or more bytes"
 
 -- | Wrap a layout with a group which is 'n' bytes in size.
 group :: Bytes -> Layout -> Layout
