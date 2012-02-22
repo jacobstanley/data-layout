@@ -148,9 +148,9 @@ optimize = optimizeOffsets . optimizeGroups
 
 -- | Calculates the total size of the layout.
 size :: Layout -> Int
-size (Value  x)       = formatSize x
+size (Value  x)    = formatSize x
 size (Offset x xs) = x + size xs
-size (Group  x _)     = x
+size (Group  x _)  = x
 size (Repeat n xs) = n * size xs
 
 -- | Gets the format of a single value in the layout.
