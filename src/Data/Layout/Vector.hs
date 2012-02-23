@@ -3,8 +3,8 @@
 {-# LANGUAGE TypeSynonymInstances #-}
 
 module Data.Layout.Vector (
-      Transformer
-    , newTransformer
+      Codec
+    , compile
     , readVector
     ) where
 
@@ -23,14 +23,13 @@ import           Foreign.Ptr (Ptr, plusPtr, castPtr)
 import           Foreign.Storable (Storable, peek, poke)
 import           System.IO.Unsafe (unsafePerformIO)
 
-import           Data.Layout.Language (size, byteOrder)
-import           Data.Layout.Language (valueSize1, valueSizeN, valueCount)
+import qualified Data.Layout.Language as L
 import           Data.Layout.Types (Layout(..), ByteOrder(..))
 
 ------------------------------------------------------------------------
 
-readVector :: Storable a => Int -> Transformer -> ByteString -> V.Vector a
-readVector n transformer bs@(PS bfp off _) =
+readVector :: Storable a => Int -> Codec -> ByteString -> V.Vector a
+readVector n codec bs@(PS bfp off _) =
     unsafePerformIO $ do
 
     -- ensure we have a big enough bytestring to fulfill the layout
@@ -46,19 +45,17 @@ readVector n transformer bs@(PS bfp off _) =
     -- add the bytestring offset
     let bp = bpOrig `plusPtr` off
 
-    -- TODO: check that bytestring is long enough
-
     -- do data transfer
-    runT transformer n (DstSrc vp bp)
+    decode codec n (DstSrc vp bp)
 
     -- return vector
     return (V.unsafeFromForeignPtr (castForeignPtr vfp) 0 elems)
   where
-    bytes = n * sizeT transformer
-    elems = n * countT transformer
+    bytes = n * decodedSize codec
+    elems = n * valueCount codec
 
     bsActualSize   = B.length bs
-    bsRequiredSize = n * layoutSizeT transformer
+    bsRequiredSize = n * encodedSize codec
 
     sizeErrMsg =
         "Data.Layout.Vector.readVector: The source ByteString " ++
@@ -71,21 +68,21 @@ readVector n transformer bs@(PS bfp off _) =
 data DstSrc = DstSrc {-# UNPACK #-} !(Ptr Word8)
                      {-# UNPACK #-} !(Ptr Word8)
 
-data Transformer = Transformer
-    { runT        :: Int -> DstSrc -> IO DstSrc
-    , sizeT       :: Int
-    , countT      :: Int
-    , layoutSizeT :: Int
+data Codec = Codec
+    { decode      :: Int -> DstSrc -> IO DstSrc
+    , encodedSize :: Int
+    , decodedSize :: Int
+    , valueCount  :: Int
     }
 
 -- | Copies data from the second memory area (source) into the first
 -- memory area (destination) using the specified layout.
-newTransformer :: Layout -> Transformer
-newTransformer layout = Transformer
-    { sizeT       = valueSizeN layout
-    , countT      = valueCount layout
-    , layoutSizeT = size layout
-    , runT        = \n -> runLayoutCopy n (buildCopyInfo layout)
+compile :: Layout -> Codec
+compile layout = Codec
+    { decode      = \n -> runLayoutCopy n (buildCopyInfo layout)
+    , encodedSize = L.size layout
+    , decodedSize = L.valueSizeN layout
+    , valueCount  = L.valueCount layout
     }
 
 runLayoutCopy :: Int -> CopyInfo -> DstSrc -> IO DstSrc
@@ -138,7 +135,7 @@ buildCopyInfo layout =
     CopyInfo { ciOffsets, ciNumValues, ciValueSize, ciSwapBytes }
   where
     ciNumValues = copySize `quot` ciValueSize
-    ciValueSize = fromIntegral (valueSize1 layout)
+    ciValueSize = fromIntegral (L.valueSize1 layout)
     ciSwapBytes = if needsByteSwap layout then 1 else 0
 
     (copySize, ciOffsets) = (splitOps . optimize . toSkipCopyOps) layout
@@ -147,10 +144,10 @@ buildCopyInfo layout =
     toSkipCopyOps :: Layout -> V.Vector SkipCopyOp
     toSkipCopyOps = go
       where
-        go v@(Value _)   = V.singleton (copyOp (valueSize1 v))
+        go v@(Value _)   = V.singleton (copyOp (L.valueSize1 v))
         go (Offset n xs) = skipOp n `V.cons` go xs
         go (Repeat n xs) = V.concat (replicate n (go xs))
-        go (Group  n xs) = go xs `V.snoc` skipOp (n - size xs)
+        go (Group  n xs) = go xs `V.snoc` skipOp (n - L.size xs)
 
         -- positive number means skip 'n' bytes
         skipOp = fromIntegral
@@ -202,7 +199,7 @@ buildCopyInfo layout =
 -- Endian check
 
 needsByteSwap :: Layout -> Bool
-needsByteSwap x = case byteOrder x of
+needsByteSwap x = case L.byteOrder x of
     NoByteOrder  -> False
     LittleEndian -> hostIsBigEndian
     BigEndian    -> hostIsLittleEndian
