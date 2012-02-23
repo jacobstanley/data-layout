@@ -5,7 +5,7 @@
 module Data.Layout.Vector (
       Codec
     , compile
-    , readVector
+    , decodeVector
     ) where
 
 import           Control.Monad (when)
@@ -28,15 +28,14 @@ import           Data.Layout.Types (Layout(..), ByteOrder(..))
 
 ------------------------------------------------------------------------
 
-readVector :: Storable a => Int -> Codec -> ByteString -> V.Vector a
-readVector n codec bs@(PS bfp off _) =
-    unsafePerformIO $ do
 
-    -- ensure we have a big enough bytestring to fulfill the layout
-    when (bsActualSize < bsRequiredSize) (error sizeErrMsg)
+decodeVector :: Storable a => Codec -> ByteString -> V.Vector a
+decodeVector codec bstr@(PS bfp off _) = unsafePerformIO $ do
+    -- ensure the size of the bytestring matches the codec
+    when (leftover /= 0) (error sizeErrMsg)
 
     -- allocate memory for the vector
-    vfp <- mallocForeignPtrBytes bytes
+    vfp <- mallocForeignPtrBytes vectorBytes
 
     -- unbox foreign pointers for use
     withForeignPtr bfp $ \bpOrig -> do
@@ -45,23 +44,25 @@ readVector n codec bs@(PS bfp off _) =
     -- add the bytestring offset
     let bp = bpOrig `plusPtr` off
 
-    -- do data transfer
+    -- decode the bytestring in to the vector
     decode codec n (DstSrc vp bp)
 
     -- return vector
-    return (V.unsafeFromForeignPtr (castForeignPtr vfp) 0 elems)
+    return (V.unsafeFromForeignPtr (castForeignPtr vfp) 0 vectorElems)
   where
-    bytes = n * decodedSize codec
-    elems = n * valueCount codec
+    requiredBytes = encodedSize codec
+    bstrBytes     = B.length bstr
 
-    bsActualSize   = B.length bs
-    bsRequiredSize = n * encodedSize codec
+    (n, leftover) = bstrBytes `quotRem` requiredBytes
+
+    vectorBytes   = n * decodedSize codec
+    vectorElems   = n * valueCount codec
 
     sizeErrMsg =
-        "Data.Layout.Vector.readVector: The source ByteString " ++
-        "is too small to hold the data specified by the layout. " ++
-        show bsRequiredSize ++ " bytes are required, but only " ++
-        show bsActualSize ++ " bytes were provided."
+        "Data.Layout.Vector.decodeVector: The source ByteString is " ++
+        "not a multiple of " ++ show requiredBytes ++ " bytes, as " ++
+        "required by the Codec. " ++ show bstrBytes ++ " bytes were " ++
+        "provided, which leaves " ++ show leftover ++ " bytes unused."
 
 ------------------------------------------------------------------------
 
