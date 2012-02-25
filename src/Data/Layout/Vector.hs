@@ -1,10 +1,14 @@
 {-# LANGUAGE ForeignFunctionInterface #-}
+{-# LANGUAGE GADTs #-}
 {-# LANGUAGE NamedFieldPuns #-}
-{-# LANGUAGE TypeSynonymInstances #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 
 module Data.Layout.Vector (
       Codec
     , compile
+
+    , StorableVector (..)
+    , encodeVectors
     , decodeVector
     ) where
 
@@ -12,43 +16,79 @@ import           Control.Monad (when)
 import           Data.ByteString (ByteString)
 import qualified Data.ByteString as B
 import           Data.ByteString.Internal (ByteString(..))
+import           Data.List (nub)
 import qualified Data.Vector.Storable as V
 import           Data.Word (Word8, Word32)
 import           Foreign.C (CInt)
-import           Foreign.ForeignPtr (mallocForeignPtrBytes)
-import           Foreign.ForeignPtr (withForeignPtr, castForeignPtr)
+import           Foreign.ForeignPtr ()
+import           Foreign.ForeignPtr (ForeignPtr, withForeignPtr, castForeignPtr)
 import           Foreign.Marshal (with)
 import           Foreign.Marshal.Alloc (alloca)
 import           Foreign.Ptr (Ptr, plusPtr, castPtr)
-import           Foreign.Storable (Storable, peek, poke)
+import           Foreign.Storable (Storable, peek, poke, sizeOf)
 import           System.IO.Unsafe (unsafePerformIO)
 
+import           Data.Layout.ForeignPtr (mallocPlainForeignPtrBytes)
 import qualified Data.Layout.Language as L
 import           Data.Layout.Types (Layout(..), ByteOrder(..))
 
+import           Debug.Trace
+
 ------------------------------------------------------------------------
+-- Vector Operations
 
+data StorableVector where
+    SV :: Storable a => V.Vector a -> StorableVector
 
-decodeVector :: Storable a => Codec -> ByteString -> V.Vector a
-decodeVector codec bstr@(PS bfp off _) = unsafePerformIO $ do
+encodeVectors :: [(Codec, StorableVector)] -> ByteString
+encodeVectors [] = B.empty
+encodeVectors xs = unsafePerformIO $ do
+    -- check all codecs produce the same size output
+    when (uniqueSizeCount /= 1) (error sizeErrMsg)
+
+    -- check that each vector type matches its codec
+    mapM_ check xs
+
+    return B.empty
+  where
+    sizes@(bstrBytes:_) = map (encodedSize . fst) xs
+    uniqueSizes         = nub sizes
+    uniqueSizeCount     = length uniqueSizes
+
+    reps@(n:_) = map go xs
+    go (c, SV v) = valueCount c `quot` V.length v
+
+    check (c, SV v) = checkValueSize "encodeVectors" c v
+
+    sizeErrMsg = concat
+      [ "Data.Layout.Vector.encodeVectors: "
+      , "The codecs specified do not have data layouts with the same "
+      , "encoded size. ", show uniqueSizeCount, " different sizes "
+      , show uniqueSizes, " were found when verifying the encoded size "
+      , "of each codec: ", show sizes ]
+
+    -- go :: (Codec, StorableVector) -> ByteString
+    -- go (c, SV (v :: V.Vector a)) = trace msg (B.pack [65,66,67])
+    --   where
+    --     msg = "elems = " ++ show (V.length v) ++
+    --           ", elemSize = " ++ show (sizeOf (undefined :: a))
+
+decodeVector :: forall a. Storable a => Codec -> ByteString -> V.Vector a
+decodeVector codec bstr@(PS bp bpOff _) = unsafePerformIO $ do
     -- ensure the size of the bytestring matches the codec
-    when (leftover /= 0) (error sizeErrMsg)
+    when (leftover /= 0) (error totalSizeErrMsg)
+
+    -- check that the vector type matches the codec
+    checkValueSize "decodeVector" codec (V.empty :: V.Vector a)
 
     -- allocate memory for the vector
-    vfp <- mallocForeignPtrBytes vectorBytes
-
-    -- unbox foreign pointers for use
-    withForeignPtr bfp $ \bpOrig -> do
-    withForeignPtr vfp $ \vp -> do
-
-    -- add the bytestring offset
-    let bp = bpOrig `plusPtr` off
+    vp <- mallocPlainForeignPtrBytes vectorBytes
 
     -- decode the bytestring in to the vector
-    decode codec n (DstSrc vp bp)
+    decode codec n (DstPtr vp 0) (SrcPtr bp bpOff)
 
     -- return vector
-    return (V.unsafeFromForeignPtr (castForeignPtr vfp) 0 vectorElems)
+    return (V.unsafeFromForeignPtr0 (castForeignPtr vp) vectorElems)
   where
     requiredBytes = encodedSize codec
     bstrBytes     = B.length bstr
@@ -58,22 +98,46 @@ decodeVector codec bstr@(PS bfp off _) = unsafePerformIO $ do
     vectorBytes   = n * decodedSize codec
     vectorElems   = n * valueCount codec
 
-    sizeErrMsg =
-        "Data.Layout.Vector.decodeVector: The source ByteString is " ++
-        "not a multiple of " ++ show requiredBytes ++ " bytes, as " ++
-        "required by the Codec. " ++ show bstrBytes ++ " bytes were " ++
-        "provided, which leaves " ++ show leftover ++ " bytes unused."
+    totalSizeErrMsg = concat
+      [ "Data.Layout.Vector.decodeVector: "
+      , "The source ByteString is not a multiple of "
+      , show requiredBytes, " bytes, as required by the Codec. "
+      , show bstrBytes, " bytes were provided, which leaves "
+      , show leftover, " bytes unused." ]
+
+-- | Ensures the value size of the codec matches the vector type.
+checkValueSize :: forall a m. (Storable a, Monad m)
+               => String -> Codec -> V.Vector a -> m ()
+checkValueSize fn codec _ =
+    when (codecValueSize /= vectorElemSize) (error errorMsg)
+  where
+    codecValueSize = valueSize codec
+    vectorElemSize = sizeOf (undefined :: a)
+
+    errorMsg = concat
+      [ "Data.Layout.Vector.", fn, ": "
+      , "Value size mismatch. The value size of a codec ("
+      , show codecValueSize, " bytes) did not match the size of "
+      , "individual elements (", show vectorElemSize, " bytes) in "
+      , "the corresponding vector. This means that the wrong type "
+      , "of vector is being used for a given codec." ]
+
 
 ------------------------------------------------------------------------
+-- Ptr Operations
 
-data DstSrc = DstSrc {-# UNPACK #-} !(Ptr Word8)
-                     {-# UNPACK #-} !(Ptr Word8)
+data DstPtr = DstPtr {-# UNPACK #-} !(ForeignPtr Word8)
+                     {-# UNPACK #-} !Int
+
+data SrcPtr = SrcPtr {-# UNPACK #-} !(ForeignPtr Word8)
+                     {-# UNPACK #-} !Int
 
 data Codec = Codec
-    { decode      :: Int -> DstSrc -> IO DstSrc
+    { decode      :: Int -> DstPtr -> SrcPtr -> IO ()
     , encodedSize :: Int
     , decodedSize :: Int
     , valueCount  :: Int
+    , valueSize   :: Int
     }
 
 -- | Copies data from the second memory area (source) into the first
@@ -84,35 +148,37 @@ compile layout = Codec
     , encodedSize = L.size layout
     , decodedSize = L.valueSizeN layout
     , valueCount  = L.valueCount layout
+    , valueSize   = L.valueSize1 layout
     }
 
-runLayoutCopy :: Int -> CopyInfo -> DstSrc -> IO DstSrc
-runLayoutCopy reps info (DstSrc dst src) =
-    with dst $ \pDst ->
-    with src $ \pSrc ->
-    V.unsafeWith (ciOffsets info) $ \pOffsets -> do
+runLayoutCopy :: Int -> CopyInfo -> DstPtr -> SrcPtr -> IO ()
+runLayoutCopy reps info (DstPtr dstFP dstOff) (SrcPtr srcFP srcOff) =
+    -- unbox foreign pointers for use
+    withForeignPtr dstFP $ \dst0 -> do
+    withForeignPtr srcFP $ \src0 -> do
 
-    -- this mutates pDst and pSrc
-    err <- c_copy
-        pDst pSrc
+    -- add the offset
+    let dst = dst0 `plusPtr` dstOff
+        src = src0 `plusPtr` srcOff
+
+    -- get a pointer to the offsets
+    V.unsafeWith (ciOffsets info) $ \offsets -> do
+
+    -- decode the data
+    err <- c_decode
+        dst src
         (fromIntegral reps)
         (ciNumOffsets info)
-        pOffsets
+        offsets
         (ciNumValues info)
         (ciValueSize info)
         (ciSwapBytes info)
 
+    -- check error code
     case err of
       0 -> return ()
       1 -> error ("runLayoutCopy: invalid value size: " ++ show (ciValueSize info))
       _ -> error "runLayoutCopy: unknown error"
-
-    -- pDst and pSrc now contain the
-    -- new dst/src locations
-    dst' <- peek pDst
-    src' <- peek pSrc
-
-    return (DstSrc dst' src')
 
 
 ------------------------------------------------------------------------
@@ -220,13 +286,13 @@ hostIsBigEndian = endianCheck == 1
 ------------------------------------------------------------------------
 -- FFI
 
-foreign import ccall unsafe "data_layout_copy"
-    c_copy :: Ptr (Ptr Word8) -- (in/out) destination memory area
-           -> Ptr (Ptr Word8) -- (in/out) source memory area
-           -> CInt     -- (in) number of times to repeat the copy instructions
-           -> CInt     -- (in) number of skip operations in 'offsets'
-           -> Ptr CInt -- (in) offset / skip list
-           -> CInt     -- (in) number of values to copy in between each skip
-           -> CInt     -- (in) size of a single value in bytes
-           -> CInt     -- (in) non-zero to swap the byte order of values
-           -> IO CInt  -- (ret) zero on success, non-zero otherwise
+foreign import ccall unsafe "data_layout_decode"
+    c_decode :: Ptr Word8 -- (in) destination memory area
+             -> Ptr Word8 -- (in) source memory area
+             -> CInt      -- (in) number of times to repeat the decode
+             -> CInt      -- (in) number of skip operations in 'offsets'
+             -> Ptr CInt  -- (in) offset / skip list
+             -> CInt      -- (in) number of values to copy in between each skip
+             -> CInt      -- (in) size of a single value in bytes
+             -> CInt      -- (in) non-zero to swap the byte order of values
+             -> IO CInt   -- (ret) zero on success, non-zero otherwise

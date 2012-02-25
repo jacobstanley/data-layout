@@ -16,9 +16,10 @@ library
 
   exposed-modules:
     Data.Layout
-    Data.Layout.Vector
     Data.Layout.Language
+    Data.Layout.Vector
   other-modules:
+    Data.Layout.ForeignPtr
     Data.Layout.Types
 
   build-depends:

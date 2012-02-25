@@ -19,16 +19,16 @@ case sizeof (_type):                                       \
     /* repeat 'num_reps' times */                          \
     for (r = 0; r < num_reps; ++r) {                       \
         /* skip 'offsets[0]' bytes */                      \
-        s += offsets[0];                                   \
+        src += offsets[0];                                 \
         for (o = 1; o < num_offsets; ++o) {                \
             /* copy 'num_values * sizeof (_type)' bytes */ \
             for (v = 0; v < num_values; v++) {             \
-                *(_type *)d = _bswap(*(_type *)s);         \
-                d += sizeof (_type);                       \
-                s += sizeof (_type);                       \
+                *(_type *)dst = _bswap(*(_type *)src);     \
+                dst += sizeof (_type);                     \
+                src += sizeof (_type);                     \
             }                                              \
             /* skip 'offsets[o]' bytes */                  \
-            s += offsets[o];                               \
+            src += offsets[o];                             \
         }                                                  \
     }                                                      \
 break;
@@ -42,10 +42,10 @@ break;
  *
  * Returns zero on success, non-zero otherwise.
  */
-int data_layout_copy
-    ( char **dst       /* destination memory area */
-    , char **src       /* source memory area */
-    , int num_reps     /* number of times to repeat the copy instructions */
+int data_layout_decode
+    ( char *dst        /* destination memory area */
+    , char *src        /* source memory area */
+    , int num_reps     /* number of times to repeat the decode */
     , int num_offsets  /* number of skip operations in 'offsets' */
     , int *offsets     /* list with number of bytes to skip in between each copy */
     , int num_values   /* number of values to copy in between each skip */
@@ -54,10 +54,6 @@ int data_layout_copy
     )
 {
     int r, o, v;
-    char *d, *s;
-
-    d = *dst;
-    s = *src;
 
     if (swap_bytes) {
         switch (value_size) {
@@ -76,9 +72,6 @@ int data_layout_copy
             default: return ERROR;
         }
     }
-
-    *dst = d;
-    *src = s;
 
     return OK;
 }
