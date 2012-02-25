@@ -35,49 +35,48 @@ import           Data.Layout.Types (Layout(..), ByteOrder(..))
 import           Debug.Trace
 
 ------------------------------------------------------------------------
--- Vector Operations
+-- Vector Encoding Operations
 
 data StorableVector where
     SV :: Storable a => V.Vector a -> StorableVector
 
 encodeVectors :: [(Codec, StorableVector)] -> ByteString
 encodeVectors [] = B.empty
-encodeVectors xs = unsafePerformIO $ do
-    -- check all codecs produce the same size output
-    when (uniqueSizeCount /= 1) (error sizeErrMsg)
+encodeVectors xs@((codec, SV vec):_) = unsafePerformIO $ do
+    -- allocate memory for the bytestring
+    bp <- mallocPlainForeignPtrBytes bstrBytes
 
-    -- check that each vector type matches its codec
-    mapM_ check xs
+    -- encode each vector
+    mapM_ (go (DstPtr bp 0)) xs
 
-    return B.empty
+    -- return the bytestring
+    return (PS bp 0 bstrBytes)
   where
-    sizes@(bstrBytes:_) = map (encodedSize . fst) xs
-    uniqueSizes         = nub sizes
-    uniqueSizeCount     = length uniqueSizes
+    bstrBytes = encodeReps codec vec * encodedSize codec
 
-    reps@(n:_) = map go xs
-    go (c, SV v) = valueCount c `quot` V.length v
+    go dp (c, SV v) = encodeVector c dp v
 
-    check (c, SV v) = checkValueSize "encodeVectors" c v
+encodeVector :: forall a. Storable a => Codec -> DstPtr -> V.Vector a -> IO ()
+encodeVector codec dstPtr vec = do
+    -- check that the vector type matches the codec
+    checkValueSize "encodeVector" codec vec
 
-    sizeErrMsg = concat
-      [ "Data.Layout.Vector.encodeVectors: "
-      , "The codecs specified do not have data layouts with the same "
-      , "encoded size. ", show uniqueSizeCount, " different sizes "
-      , show uniqueSizes, " were found when verifying the encoded size "
-      , "of each codec: ", show sizes ]
+    -- get a pointer to the vector elements
+    let vp = castForeignPtr (fst (V.unsafeToForeignPtr0 vec))
 
-    -- go :: (Codec, StorableVector) -> ByteString
-    -- go (c, SV (v :: V.Vector a)) = trace msg (B.pack [65,66,67])
-    --   where
-    --     msg = "elems = " ++ show (V.length v) ++
-    --           ", elemSize = " ++ show (sizeOf (undefined :: a))
+    -- encode the vector
+    encode codec n dstPtr (SrcPtr vp 0)
+  where
+    n = encodeReps codec vec
+
+encodeReps :: Storable a => Codec -> V.Vector a -> Int
+encodeReps c v = repetitions "Vector" (vectorSize v) (decodedSize c)
+
+------------------------------------------------------------------------
+-- Vector Decoding Operations
 
 decodeVector :: forall a. Storable a => Codec -> ByteString -> V.Vector a
 decodeVector codec bstr@(PS bp bpOff _) = unsafePerformIO $ do
-    -- ensure the size of the bytestring matches the codec
-    when (leftover /= 0) (error totalSizeErrMsg)
-
     -- check that the vector type matches the codec
     checkValueSize "decodeVector" codec (V.empty :: V.Vector a)
 
@@ -87,23 +86,19 @@ decodeVector codec bstr@(PS bp bpOff _) = unsafePerformIO $ do
     -- decode the bytestring in to the vector
     decode codec n (DstPtr vp 0) (SrcPtr bp bpOff)
 
-    -- return vector
+    -- return the vector
     return (V.unsafeFromForeignPtr0 (castForeignPtr vp) vectorElems)
   where
-    requiredBytes = encodedSize codec
-    bstrBytes     = B.length bstr
+    n = repetitions "ByteString" (B.length bstr) (encodedSize codec)
 
-    (n, leftover) = bstrBytes `quotRem` requiredBytes
+    vectorBytes = n * decodedSize codec
+    vectorElems = n * valueCount codec
 
-    vectorBytes   = n * decodedSize codec
-    vectorElems   = n * valueCount codec
+------------------------------------------------------------------------
+-- Vector Utils
 
-    totalSizeErrMsg = concat
-      [ "Data.Layout.Vector.decodeVector: "
-      , "The source ByteString is not a multiple of "
-      , show requiredBytes, " bytes, as required by the Codec. "
-      , show bstrBytes, " bytes were provided, which leaves "
-      , show leftover, " bytes unused." ]
+vectorSize :: forall a. Storable a => V.Vector a -> Int
+vectorSize v = V.length v * sizeOf (undefined :: a)
 
 -- | Ensures the value size of the codec matches the vector type.
 checkValueSize :: forall a m. (Storable a, Monad m)
@@ -122,6 +117,19 @@ checkValueSize fn codec _ =
       , "the corresponding vector. This means that the wrong type "
       , "of vector is being used for a given codec." ]
 
+repetitions :: String -> Int -> Int -> Int
+repetitions sourceName sourceBytes codecBytes =
+    if leftover /= 0 then error msg else n
+  where
+    (n, leftover) = sourceBytes `quotRem` codecBytes
+
+    msg = concat
+      [ "Data.Layout.Vector.encodeReps: "
+      , "The source ", sourceName, " is not a multiple of "
+      , show codecBytes, " bytes, as required by the Codec. "
+      , show sourceBytes, " bytes were provided, which leaves "
+      , show leftover, " bytes unused." ]
+
 
 ------------------------------------------------------------------------
 -- Ptr Operations
@@ -133,26 +141,28 @@ data SrcPtr = SrcPtr {-# UNPACK #-} !(ForeignPtr Word8)
                      {-# UNPACK #-} !Int
 
 data Codec = Codec
-    { decode      :: Int -> DstPtr -> SrcPtr -> IO ()
+    { encode      :: Int -> DstPtr -> SrcPtr -> IO ()
+    , decode      :: Int -> DstPtr -> SrcPtr -> IO ()
     , encodedSize :: Int
     , decodedSize :: Int
     , valueCount  :: Int
     , valueSize   :: Int
     }
 
--- | Copies data from the second memory area (source) into the first
--- memory area (destination) using the specified layout.
+-- | Compiles a data layout in to a codec capable of encoding
+-- and decoding data stored in the layout.
 compile :: Layout -> Codec
 compile layout = Codec
-    { decode      = \n -> runLayoutCopy n (buildCopyInfo layout)
+    { encode      = \n -> runCodec n (buildCopyInfo layout) c_encode
+    , decode      = \n -> runCodec n (buildCopyInfo layout) c_decode
     , encodedSize = L.size layout
     , decodedSize = L.valueSizeN layout
     , valueCount  = L.valueCount layout
     , valueSize   = L.valueSize1 layout
     }
 
-runLayoutCopy :: Int -> CopyInfo -> DstPtr -> SrcPtr -> IO ()
-runLayoutCopy reps info (DstPtr dstFP dstOff) (SrcPtr srcFP srcOff) =
+runCodec :: Int -> CopyInfo -> CodecFn -> DstPtr -> SrcPtr -> IO ()
+runCodec reps info c_codec_fn (DstPtr dstFP dstOff) (SrcPtr srcFP srcOff) =
     -- unbox foreign pointers for use
     withForeignPtr dstFP $ \dst0 -> do
     withForeignPtr srcFP $ \src0 -> do
@@ -165,7 +175,7 @@ runLayoutCopy reps info (DstPtr dstFP dstOff) (SrcPtr srcFP srcOff) =
     V.unsafeWith (ciOffsets info) $ \offsets -> do
 
     -- decode the data
-    err <- c_decode
+    err <- c_codec_fn
         dst src
         (fromIntegral reps)
         (ciNumOffsets info)
@@ -177,8 +187,8 @@ runLayoutCopy reps info (DstPtr dstFP dstOff) (SrcPtr srcFP srcOff) =
     -- check error code
     case err of
       0 -> return ()
-      1 -> error ("runLayoutCopy: invalid value size: " ++ show (ciValueSize info))
-      _ -> error "runLayoutCopy: unknown error"
+      1 -> error ("runCodec: invalid value size: " ++ show (ciValueSize info))
+      _ -> error "runCodec: unknown error"
 
 
 ------------------------------------------------------------------------
@@ -286,13 +296,19 @@ hostIsBigEndian = endianCheck == 1
 ------------------------------------------------------------------------
 -- FFI
 
+type CodecFn =
+       Ptr Word8 -- ^ destination memory area
+    -> Ptr Word8 -- ^ source memory area
+    -> CInt      -- ^ number of times to repeat the encode/decode
+    -> CInt      -- ^ number of skip operations in 'offsets'
+    -> Ptr CInt  -- ^ offset / skip list
+    -> CInt      -- ^ number of values to copy in between each skip
+    -> CInt      -- ^ size of a single value in bytes
+    -> CInt      -- ^ non-zero to swap the byte order of values
+    -> IO CInt   -- ^ zero on success, non-zero otherwise
+
+foreign import ccall unsafe "data_layout_encode"
+    c_encode :: CodecFn
+
 foreign import ccall unsafe "data_layout_decode"
-    c_decode :: Ptr Word8 -- (in) destination memory area
-             -> Ptr Word8 -- (in) source memory area
-             -> CInt      -- (in) number of times to repeat the decode
-             -> CInt      -- (in) number of skip operations in 'offsets'
-             -> Ptr CInt  -- (in) offset / skip list
-             -> CInt      -- (in) number of values to copy in between each skip
-             -> CInt      -- (in) size of a single value in bytes
-             -> CInt      -- (in) non-zero to swap the byte order of values
-             -> IO CInt   -- (ret) zero on success, non-zero otherwise
+    c_decode :: CodecFn

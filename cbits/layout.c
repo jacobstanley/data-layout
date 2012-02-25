@@ -14,12 +14,26 @@ inline static uint16_t bswap16(uint16_t n)
     return (n >> 8) | (n << 8);
 }
 
-#define CASE(_type,_bswap)                                 \
+/*
+ * Defines an encode/decode case for the specified type
+ * and byte order.
+ *
+ * enc    The memory area (src or dst) which contains or will
+ *        contain the encoded data. During encoding this will
+ *        be 'dst' and during decoding this will be 'src'.
+ *
+ * type   The type of the values to copy.
+ *
+ * bswap  The function to use to swap the byte order. Pass
+ *        the identity function if no byte swapping is
+ *        required.
+ */
+#define CASE(_enc,_type,_bswap)                            \
 case sizeof (_type):                                       \
     /* repeat 'num_reps' times */                          \
     for (r = 0; r < num_reps; ++r) {                       \
         /* skip 'offsets[0]' bytes */                      \
-        src += offsets[0];                                 \
+        _enc += offsets[0];                                \
         for (o = 1; o < num_offsets; ++o) {                \
             /* copy 'num_values * sizeof (_type)' bytes */ \
             for (v = 0; v < num_values; v++) {             \
@@ -28,7 +42,7 @@ case sizeof (_type):                                       \
                 src += sizeof (_type);                     \
             }                                              \
             /* skip 'offsets[o]' bytes */                  \
-            src += offsets[o];                             \
+            _enc += offsets[o];                            \
         }                                                  \
     }                                                      \
 break;
@@ -37,41 +51,57 @@ break;
 #define ERROR 1
 
 /*
+ * data_layout_encode / data_layout_decode
+ *
  * Copies data from the second memory area (source) into the first
  * memory area (destination) using the specified operations.
  *
+ * dst          destination memory area
+ * src          source memory area
+ * num_reps     number of times to repeat the decode
+ * num_offsets  number of skip operations in 'offsets'
+ * offsets      list with number of bytes to skip in between each copy
+ * num_values   number of values to copy in between each skip
+ * value_size   size of a single value in bytes
+ * swap_bytes   non-zero to swap the byte order of values
+ *
  * Returns zero on success, non-zero otherwise.
  */
-int data_layout_decode
-    ( char *dst        /* destination memory area */
-    , char *src        /* source memory area */
-    , int num_reps     /* number of times to repeat the decode */
-    , int num_offsets  /* number of skip operations in 'offsets' */
-    , int *offsets     /* list with number of bytes to skip in between each copy */
-    , int num_values   /* number of values to copy in between each skip */
-    , int value_size   /* size of a single value in bytes */
-    , int swap_bytes   /* non-zero to swap the byte order of values */
-    )
-{
-    int r, o, v;
 
-    if (swap_bytes) {
-        switch (value_size) {
-            CASE (uint64_t, bswap64);
-            CASE (uint32_t, bswap32);
-            CASE (uint16_t, bswap16);
-            CASE (uint8_t,  id);
-            default: return ERROR;
-        }
-    } else {
-        switch (value_size) {
-            CASE (uint64_t, id);
-            CASE (uint32_t, id);
-            CASE (uint16_t, id);
-            CASE (uint8_t,  id);
-            default: return ERROR;
-        }
-    }
-
-    return OK;
+#define CODEC_FN(_name,_enc)                               \
+int data_layout_##_name                                    \
+    ( char *dst                                            \
+    , char *src                                            \
+    , int num_reps                                         \
+    , int num_offsets                                      \
+    , int *offsets                                         \
+    , int num_values                                       \
+    , int value_size                                       \
+    , int swap_bytes                                       \
+    )                                                      \
+{                                                          \
+    int r, o, v;                                           \
+                                                           \
+    if (swap_bytes) {                                      \
+        switch (value_size) {                              \
+            CASE (_enc, uint64_t, bswap64);                \
+            CASE (_enc, uint32_t, bswap32);                \
+            CASE (_enc, uint16_t, bswap16);                \
+            CASE (_enc, uint8_t,  id);                     \
+            default: return ERROR;                         \
+        }                                                  \
+    } else {                                               \
+        switch (value_size) {                              \
+            CASE (_enc, uint64_t, id);                     \
+            CASE (_enc, uint32_t, id);                     \
+            CASE (_enc, uint16_t, id);                     \
+            CASE (_enc, uint8_t,  id);                     \
+            default: return ERROR;                         \
+        }                                                  \
+    }                                                      \
+                                                           \
+    return OK;                                             \
 }
+
+CODEC_FN (encode, dst)
+CODEC_FN (decode, src)
