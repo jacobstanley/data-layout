@@ -16,13 +16,11 @@ import           Control.Monad (when)
 import           Data.ByteString (ByteString)
 import qualified Data.ByteString as B
 import           Data.ByteString.Internal (ByteString(..))
-import           Data.List (nub)
 import qualified Data.Vector.Storable as V
 import           Data.Word (Word8, Word32)
 import           Foreign.C (CInt)
 import           Foreign.ForeignPtr ()
 import           Foreign.ForeignPtr (ForeignPtr, withForeignPtr, castForeignPtr)
-import           Foreign.Marshal (with)
 import           Foreign.Marshal.Alloc (alloca)
 import           Foreign.Ptr (Ptr, plusPtr, castPtr)
 import           Foreign.Storable (Storable, peek, poke, sizeOf)
@@ -31,8 +29,6 @@ import           System.IO.Unsafe (unsafePerformIO)
 import           Data.Layout.ForeignPtr (mallocPlainForeignPtrBytes)
 import qualified Data.Layout.Language as L
 import           Data.Layout.Types (Layout(..), ByteOrder(..))
-
-import           Debug.Trace
 
 ------------------------------------------------------------------------
 -- Vector Encoding Operations
@@ -153,16 +149,18 @@ data Codec = Codec
 -- and decoding data stored in the layout.
 compile :: Layout -> Codec
 compile layout = Codec
-    { encode      = \n -> runCodec n (buildCopyInfo layout) c_encode
-    , decode      = \n -> runCodec n (buildCopyInfo layout) c_decode
+    { encode      = runCodec copyInfo c_encode
+    , decode      = runCodec copyInfo c_decode
     , encodedSize = L.size layout
     , decodedSize = L.valueSizeN layout
     , valueCount  = L.valueCount layout
     , valueSize   = L.valueSize1 layout
     }
+  where
+    copyInfo = buildCopyInfo layout
 
-runCodec :: Int -> CopyInfo -> CodecFn -> DstPtr -> SrcPtr -> IO ()
-runCodec reps info c_codec_fn (DstPtr dstFP dstOff) (SrcPtr srcFP srcOff) =
+runCodec :: CopyInfo -> CodecFn -> Int -> DstPtr -> SrcPtr -> IO ()
+runCodec info c_codec_fn reps (DstPtr dstFP dstOff) (SrcPtr srcFP srcOff) =
     -- unbox foreign pointers for use
     withForeignPtr dstFP $ \dst0 -> do
     withForeignPtr srcFP $ \src0 -> do
