@@ -18,7 +18,7 @@ import qualified Data.ByteString as B
 import           Data.ByteString.Internal (ByteString(..))
 import qualified Data.Vector.Storable as V
 import           Data.Word (Word8, Word32)
-import           Foreign.C (CInt)
+import           Foreign.C (CInt (..))
 import           Foreign.ForeignPtr ()
 import           Foreign.ForeignPtr (ForeignPtr, withForeignPtr, castForeignPtr)
 import           Foreign.Marshal.Alloc (alloca)
