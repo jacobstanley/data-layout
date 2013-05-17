@@ -4,7 +4,7 @@ synopsis:      Read/write arbitrary binary layouts in to Data.Vector.
 homepage:      http://github.com/jystic/data-layout
 license:       BSD3
 license-file:  LICENSE
-copyright:     Jacob Stanley (c) 2012
+copyright:     Jacob Stanley (c) 2012-2013
 author:        Jacob Stanley
 maintainer:    Jacob Stanley <jacob@stanley.io>
 category:      Data
@@ -24,8 +24,8 @@ library
 
   build-depends:
       base       == 4.*
-    , bytestring == 0.9.*
-    , vector     == 0.9.*
+    , bytestring == 0.10.*
+    , vector     == 0.10.*
 
   c-sources: cbits/layout.c
   cc-options: -Wall -Werror -O3
