@@ -10,6 +10,6 @@ module Data.Layout (
     , module Data.Layout.Vector
     ) where
 
+import Data.Layout.Internal
 import Data.Layout.Language
-import Data.Layout.Types
 import Data.Layout.Vector

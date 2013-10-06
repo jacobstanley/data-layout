@@ -31,7 +31,7 @@ module Data.Layout.Language (
 
 import Prelude hiding (repeat)
 
-import Data.Layout.Types
+import Data.Layout.Internal
 
 ------------------------------------------------------------------------
 -- Combinators

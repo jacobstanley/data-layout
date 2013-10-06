@@ -1,6 +1,10 @@
 name:          data-layout
 version:       0.1.0.0
-synopsis:      Read/write arbitrary binary layouts in to Data.Vector.
+synopsis:      Read/write arbitrary binary layouts to a "Data.Vector.Storable".
+description:   A DSL for describing data laid out in a regular fashion with
+               a combination of structures and arrays. Once described, data can
+               be read from a strict "Data.ByteString" in to a
+               "Data.Vector.Storable", and back out again.
 homepage:      http://github.com/jystic/data-layout
 license:       BSD3
 license-file:  LICENSE
@@ -18,14 +22,15 @@ library
     Data.Layout
     Data.Layout.Language
     Data.Layout.Vector
+    Data.Layout.Internal
+
   other-modules:
     Data.Layout.ForeignPtr
-    Data.Layout.Types
 
   build-depends:
       base       == 4.*
-    , bytestring == 0.10.*
-    , vector     == 0.10.*
+    , bytestring >= 0.10
+    , vector     >= 0.10
 
   c-sources: cbits/layout.c
   cc-options: -Wall -Werror -O3
@@ -36,6 +41,3 @@ library
     -fno-warn-unused-do-bind
     -fno-warn-orphans
     -fwarn-tabs
-
-  ghc-prof-options:
-    -auto-all

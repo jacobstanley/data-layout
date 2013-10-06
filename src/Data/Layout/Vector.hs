@@ -28,14 +28,18 @@ import           System.IO.Unsafe (unsafePerformIO)
 
 import           Data.Layout.ForeignPtr (mallocPlainForeignPtrBytes)
 import qualified Data.Layout.Language as L
-import           Data.Layout.Types (Layout(..), ByteOrder(..))
+import           Data.Layout.Internal (Layout(..), ByteOrder(..))
 
 ------------------------------------------------------------------------
 -- Vector Encoding Operations
 
+-- | Abstracts over vectors of storable types to allow
+-- calling `encodeVectors`. The `SV` constructor provides
+-- proof that the `V.Vector` contains `Storable` elements.
 data StorableVector where
     SV :: Storable a => V.Vector a -> StorableVector
 
+-- | Creates a strict `ByteString` by interleaving multiple `V.Vector`s.
 encodeVectors :: [(Codec, StorableVector)] -> ByteString
 encodeVectors [] = B.empty
 encodeVectors xs@((codec, SV vec):_) = unsafePerformIO $ do
@@ -71,6 +75,7 @@ encodeReps c v = repetitions "Vector" (vectorSize v) (decodedSize c)
 ------------------------------------------------------------------------
 -- Vector Decoding Operations
 
+-- | Creates a `V.Vector` by decoding a strict `ByteString`
 decodeVector :: forall a. Storable a => Codec -> ByteString -> V.Vector a
 decodeVector codec bstr@(PS bp bpOff _) = unsafePerformIO $ do
     -- check that the vector type matches the codec
@@ -136,6 +141,8 @@ data DstPtr = DstPtr {-# UNPACK #-} !(ForeignPtr Word8)
 data SrcPtr = SrcPtr {-# UNPACK #-} !(ForeignPtr Word8)
                      {-# UNPACK #-} !Int
 
+-- | Contains the information required to encode or decode a
+-- `V.Vector` from its arbitrary layout in a strict `ByteString`.
 data Codec = Codec
     { encode      :: Int -> DstPtr -> SrcPtr -> IO ()
     , decode      :: Int -> DstPtr -> SrcPtr -> IO ()
